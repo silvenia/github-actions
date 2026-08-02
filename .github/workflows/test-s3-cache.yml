@@ -31,9 +31,10 @@ jobs:
 
       - name: Create cache bucket
         run: |
-          docker run --rm --network host minio/mc sh -c \
-            "mc alias set local http://localhost:9000 minioadmin minioadmin >/dev/null \
-            && mc mb --ignore-existing local/cache"
+          curl -sSL -o /usr/local/bin/mc https://dl.min.io/client/mc/release/linux-amd64/mc
+          chmod +x /usr/local/bin/mc
+          mc alias set local http://localhost:9000 minioadmin minioadmin
+          mc mb --ignore-existing local/cache
 
       - name: Prepare cache payload
         run: |
