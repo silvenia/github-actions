@@ -65,7 +65,15 @@ async function execRclone(args, config) {
     core.debug(`rclone ${args.join(' ')}`);
     let stdout = '';
     let stderr = '';
-    const exitCode = await exec.exec('rclone', args, {
+    const exitCode = await exec.exec('rclone', [
+        // Fail fast on unreachable endpoints: the AWS SDK backoff inside rclone
+        // retries connection errors for minutes on end by default.
+        '--retries',
+        '2',
+        '--low-level-retries',
+        '2',
+        ...args
+    ], {
         ignoreReturnCode: true,
         silent: true,
         env: { ...process.env, ...buildRcloneEnv(config) },

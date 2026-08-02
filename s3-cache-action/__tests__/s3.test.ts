@@ -13,6 +13,8 @@ import {
   statCacheObject
 } from '../src/s3';
 
+const RETRY_ARGS = ['--retries', '2', '--low-level-retries', '2'];
+
 const config: S3Config = {
   endpoint: 'https://s3.example.com',
   accessKeyId: 'AKIAEXAMPLE',
@@ -73,7 +75,7 @@ describe('execRclone', () => {
 
     expect(exec.exec).toHaveBeenCalledWith(
       'rclone',
-      ['stat', 's3:bucket/key1'],
+      [...RETRY_ARGS, 'stat', 's3:bucket/key1'],
       expect.objectContaining({
         env: expect.objectContaining({
           ...process.env,
@@ -105,6 +107,7 @@ describe('putCacheObject', () => {
     expect(exec.exec).toHaveBeenCalledWith(
       'rclone',
       [
+        ...RETRY_ARGS,
         'copyto',
         '/tmp/cache.tgz',
         's3:bucket/key1',
@@ -165,7 +168,7 @@ describe('statCacheObject', () => {
 
     expect(exec.exec).toHaveBeenCalledWith(
       'rclone',
-      ['lsjson', 's3:bucket/key1', '--files-only', '--metadata', '--quiet'],
+      [...RETRY_ARGS, 'lsjson', 's3:bucket/key1', '--files-only', '--metadata', '--quiet'],
       expect.anything()
     );
     expect(obj).not.toBeNull();
@@ -199,7 +202,7 @@ describe('downloadCacheObject', () => {
 
     expect(exec.exec).toHaveBeenCalledWith(
       'rclone',
-      ['copyto', 's3:bucket/key1', '/tmp/cache.tgz', '--quiet'],
+      [...RETRY_ARGS, 'copyto', 's3:bucket/key1', '/tmp/cache.tgz', '--quiet'],
       expect.anything()
     );
   });
@@ -258,7 +261,7 @@ describe('listCacheObjects', () => {
 
     expect(exec.exec).toHaveBeenCalledWith(
       'rclone',
-      ['lsjson', 's3:bucket', '--files-only', '--metadata', '--quiet'],
+      [...RETRY_ARGS, 'lsjson', 's3:bucket', '--files-only', '--metadata', '--quiet'],
       expect.anything()
     );
     expect(objects.map(o => o.key)).toEqual(['linux-npm-aaa', 'linux-npm-bbb']);
@@ -296,7 +299,7 @@ describe('deleteCacheObject', () => {
 
     expect(exec.exec).toHaveBeenCalledWith(
       'rclone',
-      ['deletefile', 's3:bucket/key1', '--quiet'],
+      [...RETRY_ARGS, 'deletefile', 's3:bucket/key1', '--quiet'],
       expect.anything()
     );
   });
