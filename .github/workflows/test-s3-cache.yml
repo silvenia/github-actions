@@ -41,11 +41,14 @@ jobs:
           mkdir -p .cache-test
           echo "hello from the s3-cache-action test" > .cache-test/payload.txt
 
-      - name: Restore and save cache (first pass, expect miss)
+      # The action's save runs in its post step at job completion, so a later
+      # step in the same job can never observe it. Each run therefore uses a
+      # unique key for the miss path and seeds the hit path directly with mc.
+      - name: Restore and save cache (unique key, expect miss)
         id: cache-first
         uses: ./s3-cache-action
         with:
-          key: linux-test-${{ runner.os }}
+          key: miss-${{ github.run_id }}-${{ runner.os }}
           path: .cache-test
           s3-endpoint: http://minio:9000
           s3-access-key: minioadmin
@@ -60,11 +63,18 @@ jobs:
           fi
           echo "Cache miss on first pass, as expected"
 
-      - name: Restore cache (second pass, expect exact hit)
+      - name: Seed cache archive (same format the action saves)
+        run: |
+          command -v zstd >/dev/null || sudo apt-get update && sudo apt-get install -y zstd
+          tar --use-compress-program 'zstd -T0 --long=30' -cf /tmp/cache-seed.tzst \
+            -P -C "${{ github.workspace }}" .cache-test
+          mc cp /tmp/cache-seed.tzst local/cache/hit-${{ runner.os }}
+
+      - name: Restore cache (fixed key, expect exact hit)
         id: cache-second
         uses: ./s3-cache-action
         with:
-          key: linux-test-${{ runner.os }}
+          key: hit-${{ runner.os }}
           path: .cache-test
           s3-endpoint: http://minio:9000
           s3-access-key: minioadmin
@@ -87,23 +97,23 @@ jobs:
         id: cache-fallback
         uses: ./s3-cache-action
         with:
-          key: linux-test-v2-${{ runner.os }}
+          key: fallback-${{ github.run_id }}
           restore-keys: |
-            linux-test-
+            hit-
           path: .cache-test
           s3-endpoint: http://minio:9000
           s3-access-key: minioadmin
           s3-secret-key: minioadmin
           s3-bucket: cache
 
-      - name: Verify restore-keys fallback matched the previous key
+      - name: Verify restore-keys fallback matched the seeded key
         run: |
           if [ "${{ steps.cache-fallback.outputs.cache-hit }}" = "true" ]; then
             echo "Expected cache-hit=false for a restore-key match" >&2
             exit 1
           fi
-          if [ "${{ steps.cache-fallback.outputs.cache-matched-key }}" != "linux-test-Linux" ]; then
-            echo "Expected matched key 'linux-test-Linux', got '${{ steps.cache-fallback.outputs.cache-matched-key }}'" >&2
+          if [ "${{ steps.cache-fallback.outputs.cache-matched-key }}" != "hit-${{ runner.os }}" ]; then
+            echo "Expected matched key 'hit-${{ runner.os }}', got '${{ steps.cache-fallback.outputs.cache-matched-key }}'" >&2
             exit 1
           fi
           echo "restore-keys prefix match verified"
