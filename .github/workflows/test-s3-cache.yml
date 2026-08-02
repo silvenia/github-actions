@@ -1,0 +1,108 @@
+name: Test S3 Cache Action
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  s3-cache:
+    runs-on: ubuntu-latest
+    services:
+      minio:
+        image: minio/minio:latest
+        env:
+          MINIO_ROOT_USER: minioadmin
+          MINIO_ROOT_PASSWORD: minioadmin
+        ports:
+          - 9000:9000
+        options: >-
+          --health-cmd "curl -f http://localhost:9000/minio/health/live || exit 1"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+          --health-start-period 5s
+        volumes:
+          - minio-data:/data
+        command: server /data
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create cache bucket
+        run: |
+          docker run --rm --network host minio/mc sh -c \
+            "mc alias set local http://localhost:9000 minioadmin minioadmin >/dev/null \
+            && mc mb --ignore-existing local/cache"
+
+      - name: Prepare cache payload
+        run: |
+          mkdir -p .cache-test
+          echo "hello from the s3-cache-action test" > .cache-test/payload.txt
+
+      - name: Restore and save cache (first pass, expect miss)
+        id: cache-first
+        uses: ./s3-cache-action
+        with:
+          key: linux-test-${{ runner.os }}
+          path: .cache-test
+          s3-endpoint: http://localhost:9000
+          s3-access-key: minioadmin
+          s3-secret-key: minioadmin
+          s3-bucket: cache
+
+      - name: Verify first pass is a cache miss
+        run: |
+          if [ "${{ steps.cache-first.outputs.cache-hit }}" = "true" ]; then
+            echo "Expected a cache miss on the first pass" >&2
+            exit 1
+          fi
+          echo "Cache miss on first pass, as expected"
+
+      - name: Restore cache (second pass, expect exact hit)
+        id: cache-second
+        uses: ./s3-cache-action
+        with:
+          key: linux-test-${{ runner.os }}
+          path: .cache-test
+          s3-endpoint: http://localhost:9000
+          s3-access-key: minioadmin
+          s3-secret-key: minioadmin
+          s3-bucket: cache
+
+      - name: Verify second pass is a cache hit and payload is intact
+        run: |
+          if [ "${{ steps.cache-second.outputs.cache-hit }}" != "true" ]; then
+            echo "Expected a cache hit on the second pass" >&2
+            exit 1
+          fi
+          if [ "$(cat .cache-test/payload.txt)" != "hello from the s3-cache-action test" ]; then
+            echo "Restored payload does not match" >&2
+            exit 1
+          fi
+          echo "Cache hit on second pass, payload verified"
+
+      - name: Restore with restore-keys fallback (expect prefix match)
+        id: cache-fallback
+        uses: ./s3-cache-action
+        with:
+          key: linux-test-v2-${{ runner.os }}
+          restore-keys: |
+            linux-test-
+          path: .cache-test
+          s3-endpoint: http://localhost:9000
+          s3-access-key: minioadmin
+          s3-secret-key: minioadmin
+          s3-bucket: cache
+
+      - name: Verify restore-keys fallback matched the previous key
+        run: |
+          if [ "${{ steps.cache-fallback.outputs.cache-hit }}" = "true" ]; then
+            echo "Expected cache-hit=false for a restore-key match" >&2
+            exit 1
+          fi
+          if [ "${{ steps.cache-fallback.outputs.cache-matched-key }}" != "linux-test-Linux" ]; then
+            echo "Expected matched key 'linux-test-Linux', got '${{ steps.cache-fallback.outputs.cache-matched-key }}'" >&2
+            exit 1
+          fi
+          echo "restore-keys prefix match verified"
