@@ -2,40 +2,22 @@ import * as core from '@actions/core';
 import * as fs from 'fs';
 import * as path from 'path';
 import { S3Config, statCacheObject, downloadCacheObject, listCacheObjects } from './s3';
-import { extractTar, createTempDirectory, getArchiveFileSizeInBytes } from './cache';
-import {
-  CompressionMethod,
-  getCompressionMethod,
-  getCacheFileName,
-  getCacheVersion,
-  isExactKeyMatch,
-  validateKey,
-  validatePaths
-} from './utils';
+import { createTempDirectory, extractCacheArchive, getArchiveFileSizeInBytes } from './cache';
+import { CACHE_FILE_NAME, getCacheVersion, isExactKeyMatch, validateKey, validatePaths } from './utils';
 
 export async function restoreCache(
   primaryKey: string,
   restoreKeys: string[],
   paths: string[],
   enableCrossOsArchive: boolean,
-  failOnCacheMiss: boolean
+  failOnCacheMiss: boolean,
+  config: S3Config
 ): Promise<string | undefined> {
   validateKey(primaryKey);
   validatePaths(paths);
 
-  const compressionMethod: CompressionMethod = await getCompressionMethod();
-  const cacheVersion = getCacheVersion(paths, compressionMethod, enableCrossOsArchive);
-  core.debug(`Compression method: ${compressionMethod}`);
+  const cacheVersion = getCacheVersion(paths, enableCrossOsArchive);
   core.debug(`Cache version: ${cacheVersion}`);
-
-  const config: S3Config = {
-    endpoint: process.env.INPUT_S3_ENDPOINT!,
-    accessKeyId: process.env.INPUT_S3_ACCESS_KEY!,
-    secretAccessKey: process.env.INPUT_S3_SECRET_KEY!,
-    bucket: process.env.INPUT_S3_BUCKET!,
-    // Defaults to path-style (true); any value other than the exact string 'false' enables it
-    forcePathStyle: process.env.INPUT_S3_PATH_STYLE !== 'false'
-  };
 
   const keysToSearch = [primaryKey, ...restoreKeys];
   core.debug(`Keys to search: ${JSON.stringify(keysToSearch)}`);
@@ -44,14 +26,25 @@ export async function restoreCache(
 
   for (const key of keysToSearch) {
     const hit = await statCacheObject(config, key);
-    if (hit) {
+    if (hit && hit.metadata.cacheVersion === cacheVersion) {
       matchedKey = key;
       break;
     }
+    if (hit && key === primaryKey) {
+      core.info(
+        `Cache entry ${key} exists but was written by an incompatible action version, ignoring it.`
+      );
+    }
     if (key !== primaryKey) {
       const matches = await listCacheObjects(config, key);
-      if (matches.length > 0) {
-        matchedKey = matches[0].key;
+      for (const candidate of matches) {
+        const candidateHit = await statCacheObject(config, candidate.key);
+        if (candidateHit && candidateHit.metadata.cacheVersion === cacheVersion) {
+          matchedKey = candidate.key;
+          break;
+        }
+      }
+      if (matchedKey) {
         break;
       }
     }
@@ -70,17 +63,17 @@ export async function restoreCache(
   }
 
   const tempDir = await createTempDirectory();
-  const archivePath = path.join(tempDir, getCacheFileName(compressionMethod));
-  await downloadCacheObject(config, matchedKey, archivePath);
-
-  const archiveFileSize = getArchiveFileSizeInBytes(archivePath);
-  core.info(`Cache Size: ~${Math.round(archiveFileSize / (1024 * 1024))} MB (${archiveFileSize} B)`);
-
+  const archivePath = path.join(tempDir, CACHE_FILE_NAME);
   try {
-    await extractTar(archivePath, compressionMethod);
+    await downloadCacheObject(config, matchedKey, archivePath);
+
+    const archiveFileSize = getArchiveFileSizeInBytes(archivePath);
+    core.info(`Cache Size: ~${Math.round(archiveFileSize / (1024 * 1024))} MB (${archiveFileSize} B)`);
+
+    await extractCacheArchive(archivePath);
   } finally {
     try {
-      fs.unlinkSync(archivePath);
+      fs.rmSync(tempDir, { recursive: true, force: true });
     } catch (error) {
       core.debug(`Failed to delete archive: ${error}`);
     }

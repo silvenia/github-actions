@@ -1,5 +1,6 @@
 import * as core from '@actions/core';
 import { restoreCache } from './restore';
+import { getS3Config } from './s3';
 import { getInputAsArray, getInputAsBool } from './utils';
 
 async function run(): Promise<void> {
@@ -9,12 +10,20 @@ async function run(): Promise<void> {
     const restoreKeys = getInputAsArray('restore-keys');
     const enableCrossOsArchive = getInputAsBool('enableCrossOsArchive');
     const failOnCacheMiss = getInputAsBool('failOnCacheMiss');
+    const config = getS3Config();
 
     core.setOutput('cache-primary-key', primaryKey);
 
     core.startGroup('Restore cache');
     try {
-      await restoreCache(primaryKey, restoreKeys, paths, enableCrossOsArchive, failOnCacheMiss);
+      await restoreCache(
+        primaryKey,
+        restoreKeys,
+        paths,
+        enableCrossOsArchive,
+        failOnCacheMiss,
+        config
+      );
     } finally {
       core.endGroup();
     }

@@ -4,17 +4,28 @@ import * as os from 'os';
 import * as path from 'path';
 import * as s3 from '../src/s3';
 import * as cache from '../src/cache';
-import { CompressionMethod } from '../src/utils';
+import { getCacheVersion } from '../src/utils';
 import { restoreCache } from '../src/restore';
 
 const tempDir = path.join(os.tmpdir(), 'restore-test-temp');
+const config: s3.S3Config = {
+  endpoint: 'http://localhost:9000',
+  accessKeyId: 'minioadmin',
+  secretAccessKey: 'minioadmin',
+  region: 'us-east-1',
+  bucket: 'cache',
+  forcePathStyle: true
+};
 
-function cacheObject(key: string): s3.CacheObject {
+const PATHS = ['p1'];
+const VERSION = getCacheVersion(PATHS, false);
+
+function cacheObject(key: string, cacheVersion: string = VERSION): s3.CacheObject {
   return {
     key,
     metadata: {
-      cacheKey: key,
-      cacheVersion: 'v1',
+      cacheVersion,
+      format: '7z',
       platform: 'linux',
       size: 100
     },
@@ -27,18 +38,9 @@ beforeEach(() => {
   jest.clearAllMocks();
   jest.restoreAllMocks();
 
-  process.env.INPUT_S3_ENDPOINT = 'http://localhost:9000';
-  process.env.INPUT_S3_ACCESS_KEY = 'minioadmin';
-  process.env.INPUT_S3_SECRET_KEY = 'minioadmin';
-  process.env.INPUT_S3_BUCKET = 'cache';
-  process.env.INPUT_S3_PATH_STYLE = 'true';
-
-  jest.spyOn(require('../src/utils'), 'getCompressionMethod').mockResolvedValue(
-    CompressionMethod.Gzip
-  );
   jest.spyOn(cache, 'createTempDirectory').mockResolvedValue(tempDir);
   jest.spyOn(cache, 'getArchiveFileSizeInBytes').mockReturnValue(100);
-  jest.spyOn(cache, 'extractTar').mockResolvedValue();
+  jest.spyOn(cache, 'extractCacheArchive').mockResolvedValue();
   jest.spyOn(s3, 'downloadCacheObject').mockResolvedValue();
 });
 
@@ -48,7 +50,7 @@ describe('restoreCache', () => {
       key === 'key1' ? cacheObject('key1') : null
     );
 
-    const result = await restoreCache('key1', [], ['p1'], false, false);
+    const result = await restoreCache('key1', [], PATHS, false, false, config);
 
     expect(result).toBe('key1');
     expect(core.setOutput).toHaveBeenCalledWith('cache-hit', 'true');
@@ -57,19 +59,31 @@ describe('restoreCache', () => {
     expect(s3.downloadCacheObject).toHaveBeenCalledWith(
       expect.anything(),
       'key1',
-      path.join(tempDir, 'cache.tgz')
+      path.join(tempDir, 'cache.7z')
     );
-    expect(cache.extractTar).toHaveBeenCalledWith(
-      path.join(tempDir, 'cache.tgz'),
-      CompressionMethod.Gzip
+    expect(cache.extractCacheArchive).toHaveBeenCalledWith(path.join(tempDir, 'cache.7z'));
+  });
+
+  it('ignores an exact key object written by an incompatible action version', async () => {
+    jest.spyOn(s3, 'statCacheObject').mockImplementation(async (_config, key) =>
+      key === 'key1' ? cacheObject('key1', 'stale-version') : null
     );
+    jest.spyOn(s3, 'listCacheObjects').mockResolvedValue([]);
+
+    const result = await restoreCache('key1', [], PATHS, false, false, config);
+
+    expect(result).toBeUndefined();
+    expect(core.setOutput).toHaveBeenCalledWith('cache-hit', 'false');
+    expect(s3.downloadCacheObject).not.toHaveBeenCalled();
   });
 
   it('restores via a prefix restore-key match and sets cache-hit to false', async () => {
-    jest.spyOn(s3, 'statCacheObject').mockResolvedValue(null);
+    jest.spyOn(s3, 'statCacheObject').mockImplementation(async (_config, key) =>
+      key === 'linux-npm-abc123' ? cacheObject('linux-npm-abc123') : null
+    );
     jest.spyOn(s3, 'listCacheObjects').mockResolvedValue([cacheObject('linux-npm-abc123')]);
 
-    const result = await restoreCache('linux-npm-def456', ['linux-npm-'], ['p1'], false, false);
+    const result = await restoreCache('linux-npm-def456', ['linux-npm-'], PATHS, false, false, config);
 
     expect(result).toBe('linux-npm-abc123');
     expect(core.setOutput).toHaveBeenCalledWith('cache-hit', 'false');
@@ -77,11 +91,23 @@ describe('restoreCache', () => {
     expect(core.setOutput).toHaveBeenCalledWith('cache-primary-key', 'linux-npm-def456');
   });
 
+  it('skips prefix matches written by an incompatible action version', async () => {
+    jest.spyOn(s3, 'statCacheObject').mockImplementation(async (_config, key) =>
+      key === 'linux-npm-abc123' ? cacheObject('linux-npm-abc123', 'stale-version') : null
+    );
+    jest.spyOn(s3, 'listCacheObjects').mockResolvedValue([cacheObject('linux-npm-abc123')]);
+
+    const result = await restoreCache('linux-npm-def456', ['linux-npm-'], PATHS, false, false, config);
+
+    expect(result).toBeUndefined();
+    expect(core.setOutput).toHaveBeenCalledWith('cache-hit', 'false');
+  });
+
   it('returns undefined on a miss without failOnCacheMiss', async () => {
     jest.spyOn(s3, 'statCacheObject').mockResolvedValue(null);
     jest.spyOn(s3, 'listCacheObjects').mockResolvedValue([]);
 
-    const result = await restoreCache('key1', [], ['p1'], false, false);
+    const result = await restoreCache('key1', [], PATHS, false, false, config);
 
     expect(result).toBeUndefined();
     expect(core.setOutput).toHaveBeenCalledWith('cache-hit', 'false');
@@ -93,7 +119,7 @@ describe('restoreCache', () => {
     jest.spyOn(s3, 'statCacheObject').mockResolvedValue(null);
     jest.spyOn(s3, 'listCacheObjects').mockResolvedValue([]);
 
-    await expect(restoreCache('key1', [], ['p1'], false, true)).rejects.toThrow(
+    await expect(restoreCache('key1', [], PATHS, false, true, config)).rejects.toThrow(
       'fail-on-cache-miss'
     );
   });

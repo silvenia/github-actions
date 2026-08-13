@@ -4,19 +4,28 @@ import * as os from 'os';
 import * as path from 'path';
 import * as s3 from '../src/s3';
 import * as cache from '../src/cache';
-import { CompressionMethod } from '../src/utils';
+import { ARCHIVE_FORMAT } from '../src/utils';
 import { saveCache } from '../src/save';
 
 const tempDir = path.join(os.tmpdir(), 'save-test-temp');
-const archivePath = path.join(tempDir, 'cache.tgz');
+const archivePath = path.join(tempDir, 'cache.7z');
 const CACHE_SIZE_LIMIT = 5 * 1024 * 1024 * 1024;
+
+const config: s3.S3Config = {
+  endpoint: 'http://localhost:9000',
+  accessKeyId: 'minioadmin',
+  secretAccessKey: 'minioadmin',
+  region: 'us-east-1',
+  bucket: 'cache',
+  forcePathStyle: true
+};
 
 function cacheObject(key: string): s3.CacheObject {
   return {
     key,
     metadata: {
-      cacheKey: key,
       cacheVersion: 'v1',
+      format: '7z',
       platform: 'linux',
       size: 100
     },
@@ -29,19 +38,9 @@ beforeEach(() => {
   jest.clearAllMocks();
   jest.restoreAllMocks();
 
-  process.env.INPUT_S3_ENDPOINT = 'http://localhost:9000';
-  process.env.INPUT_S3_ACCESS_KEY = 'minioadmin';
-  process.env.INPUT_S3_SECRET_KEY = 'minioadmin';
-  process.env.INPUT_S3_BUCKET = 'cache';
-  process.env.INPUT_S3_PATH_STYLE = 'true';
-  process.env.INPUT_UPLOAD_CHUNK_SIZE = '10485760';
-
-  jest.spyOn(require('../src/utils'), 'getCompressionMethod').mockResolvedValue(
-    CompressionMethod.Gzip
-  );
   jest.spyOn(cache, 'resolvePaths').mockResolvedValue(['file1.txt']);
   jest.spyOn(cache, 'createTempDirectory').mockResolvedValue(tempDir);
-  jest.spyOn(cache, 'createTar').mockResolvedValue(archivePath);
+  jest.spyOn(cache, 'createCacheArchive').mockResolvedValue(archivePath);
   jest.spyOn(cache, 'getArchiveFileSizeInBytes').mockReturnValue(100);
   jest.spyOn(s3, 'putCacheObject').mockResolvedValue();
 });
@@ -50,27 +49,27 @@ describe('saveCache', () => {
   it('skips saving when a cache with the same key already exists', async () => {
     jest.spyOn(s3, 'statCacheObject').mockResolvedValue(cacheObject('key1'));
 
-    const result = await saveCache('key1', ['file1.txt'], false);
+    const result = await saveCache('key1', ['file1.txt'], false, config);
 
     expect(result).toBeUndefined();
     expect(s3.putCacheObject).not.toHaveBeenCalled();
     expect(core.info).toHaveBeenCalledWith('Cache already exists with key key1, not saving cache.');
   });
 
-  it('creates a tar archive and uploads it with metadata', async () => {
+  it('creates a 7z archive and uploads it with metadata', async () => {
     jest.spyOn(s3, 'statCacheObject').mockResolvedValue(null);
     jest.spyOn(cache, 'getArchiveFileSizeInBytes').mockReturnValue(123);
 
-    const result = await saveCache('key1', ['file1.txt'], false);
+    const result = await saveCache('key1', ['file1.txt'], false, config);
 
     expect(result).toBe('key1');
-    expect(cache.createTar).toHaveBeenCalledWith(tempDir, ['file1.txt'], CompressionMethod.Gzip);
+    expect(cache.createCacheArchive).toHaveBeenCalledWith(tempDir, ['file1.txt']);
     expect(s3.putCacheObject).toHaveBeenCalledWith(
       expect.anything(),
       'key1',
       archivePath,
       expect.objectContaining({
-        cacheKey: 'key1',
+        format: ARCHIVE_FORMAT,
         platform: process.platform,
         size: 123
       })
@@ -82,7 +81,7 @@ describe('saveCache', () => {
     jest.spyOn(s3, 'statCacheObject').mockResolvedValue(null);
     jest.spyOn(cache, 'getArchiveFileSizeInBytes').mockReturnValue(CACHE_SIZE_LIMIT + 1);
 
-    await expect(saveCache('key1', ['file1.txt'], false)).rejects.toThrow('5GB limit');
+    await expect(saveCache('key1', ['file1.txt'], false, config)).rejects.toThrow('5GB limit');
     expect(s3.putCacheObject).not.toHaveBeenCalled();
   });
 });

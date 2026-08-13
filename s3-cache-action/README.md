@@ -6,15 +6,23 @@ as a drop-in replacement for `actions/cache`: swap the `uses:` reference,
 supply S3 connection parameters, and keep everything else the same.
 
 The action restores the cache when the job starts and saves it when the job
-completes using the GitHub Actions lifecycle (`entrypoint` for restore,
-`post-entrypoint` with `post-if: success()` for save).
+completes using the GitHub Actions lifecycle (`main` for restore, `post` with
+`post-if: success()` for save). It runs as a plain Node.js action, so it works
+on Linux, macOS and Windows runners.
 
 ## Features
 
-- Full restore + save lifecycle in a single Docker container action
+- Full restore + save lifecycle in a single Node.js action (no Docker, no rclone)
 - Key-based restore with `restore-keys` prefix matching
-- zstd compression (gzip fallback), streaming multipart uploads/downloads via
-  rclone (pinned v1.75.0)
+- 7-Zip (LZMA2) archives, created and extracted with the runner's `7z`
+  binary (`7z`/`7zz`/`7za`/`7zr`, including the Windows `C:\Program Files\7-Zip`
+  install location)
+- Absolute-path archives: runner-home directories (`~/.cargo/registry`,
+  `~/.npm`, the pnpm store, ...) can be cached directly
+- Best-effort hard/symbolic link preservation (`-snh`/`-snl`): fully supported
+  on Windows (NTFS); on Linux 7-Zip stores hard links as copies and skips
+  relative symlinks — both self-heal on the next package-manager install
+- Streaming multipart uploads/downloads via the AWS SDK
 - Outputs: `cache-hit`, `cache-matched-key`, `cache-primary-key`
 - Path-style or virtual-hosted-style S3 addressing (`s3-path-style`)
 - Works against any S3-compatible endpoint; no GitHub cache API dependency
@@ -25,12 +33,15 @@ completes using the GitHub Actions lifecycle (`entrypoint` for restore,
 2. A bucket that already exists.
 3. Credentials with `s3:PutObject`, `s3:GetObject`, `s3:ListBucket`,
    `s3:DeleteObject` permissions on the bucket.
+4. 7-Zip installed on the runner and on PATH:
+   - Windows: `choco install 7zip` (or the standard installer)
+   - Linux/macOS: the official 7-Zip package (`7zz`) or `p7zip-full` (`7za`)
 
 ## Usage
 
 ```yaml
 - name: Restore and save S3 cache
-  uses: your-org/s3-cache-action@v1
+  uses: your-org/s3-cache-action@v2
   with:
     key: ${{ runner.os }}-npm-${{ hashFiles('**/package-lock.json') }}
     path: |
@@ -49,14 +60,15 @@ completes using the GitHub Actions lifecycle (`entrypoint` for restore,
 | Input                  | Required | Default      | Description                                                                 |
 | ---------------------- | -------- | ------------ | --------------------------------------------------------------------------- |
 | `key`                  | Yes      | —            | The cache key. If a cache with this exact key exists it is restored and the save is skipped. |
-| `path`                 | Yes      | —            | Path(s) to cache. Globs supported. Paths are relative to the repository root. |
+| `path`                 | Yes      | —            | Path(s) to cache. Globs supported. Relative paths are anchored at the repository root; absolute paths (including `~`) are used as-is. |
 | `restore-keys`         | No       | —            | Ordered fallback keys for prefix matching. |
 | `s3-endpoint`          | Yes      | —            | S3-compatible endpoint URL (e.g. `https://s3.example.com`). |
 | `s3-access-key`        | Yes      | —            | S3 access key ID. |
 | `s3-secret-key`        | Yes      | —            | S3 secret access key. |
 | `s3-bucket`            | Yes      | —            | Bucket to store cache archives in (must exist). |
+| `s3-region`            | No       | `us-east-1`  | Region sent to the endpoint (required by the AWS SDK; most self-hosted stores ignore it). |
 | `s3-path-style`        | No       | `true`       | `true` = path-style addressing (self-hosted stores); `false` = virtual-hosted-style (AWS S3). |
-| `upload-chunk-size`    | No       | `10485760`   | Multipart upload chunk size in bytes (passed as `--s3-chunk-size`). |
+| `upload-chunk-size`    | No       | `10485760`   | Multipart upload chunk size in bytes. Increase for faster uploads of large caches. |
 | `enableCrossOsArchive` | No       | `false`      | Allow cross-OS cache restore. |
 | `fail-on-cache-miss`   | No       | `false`      | Fail the job when no cache entry is found. |
 
@@ -70,23 +82,28 @@ completes using the GitHub Actions lifecycle (`entrypoint` for restore,
 
 ## How it works
 
-- **Restore** runs in the foreground (`entrypoint`): the primary key is looked
-  up with an exact object lookup, then each `restore-key` is matched as a
-  prefix against the objects in the bucket (most recent match wins). On a
-  match, the archive is streamed to disk and extracted into the workspace.
-- **Save** runs at job completion (`post-entrypoint`, `post-if: success()`):
-  the configured paths are archived with tar + zstd and uploaded with rclone
-  as a multipart upload, carrying `cache-*` user metadata on the object.
+- **Restore** runs in the foreground (`main`): the primary key is looked up
+  with an exact object lookup, then each `restore-key` is matched as a prefix
+  against the objects in the bucket (most recent match wins). Only objects
+  written by this action version (checked via the `cache-version` metadata)
+  are considered. On a match, the archive is streamed to disk and extracted
+  with `7z x -spf` into the workspace.
+- **Save** runs at job completion (`post`, `post-if: success()`): the
+  configured paths are archived with `7z a -spf` (absolute paths preserved)
+  and uploaded with a streaming multipart upload, carrying `cache-*` user
+  metadata on the object. A failed save never fails the job.
 
 Cache objects are stored in the bucket under the cache key itself, e.g.
-`linux-npm-abc123def456`, with metadata headers
-`cache-key`, `cache-version`, `cache-platform`, `cache-size`.
+`linux-npm-abc123def456`, with metadata headers `cache-version`,
+`cache-format`, `cache-platform`, `cache-size`.
 
 ## Development
 
 ```bash
 npm install
-npm run build   # compiles TypeScript into dist/
-npm test        # runs the unit test suite
-docker build -t s3-cache-action:latest .  # build the container image
+npm run build   # bundles the TypeScript sources into dist/ with ncc
+npm test        # runs the unit test suite (requires 7-Zip on PATH)
 ```
+
+The `dist/` output is committed; CI runs the end-to-end test against a MinIO
+service container.

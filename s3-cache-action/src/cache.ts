@@ -1,30 +1,47 @@
 import * as core from '@actions/core';
 import * as crypto from 'crypto';
-import * as exec from '@actions/exec';
 import * as fs from 'fs';
 import * as glob from '@actions/glob';
 import * as io from '@actions/io';
 import * as os from 'os';
 import * as path from 'path';
-import { CompressionMethod, ValidationError, getCacheFileName } from './utils';
+import { CACHE_FILE_NAME, ValidationError } from './utils';
+import { createArchive, extractArchive } from './archiver';
 
+/** Expand a leading ~ (or ~/) to the current user's home directory. */
+export function expandTilde(pattern: string): string {
+  if (pattern === '~') {
+    return os.homedir();
+  }
+  if (pattern.startsWith('~/') || pattern.startsWith('~\\')) {
+    return path.join(os.homedir(), pattern.slice(2));
+  }
+  return pattern;
+}
+
+/**
+ * Resolve the configured cache paths to absolute paths.
+ *
+ * Relative patterns are anchored at GITHUB_WORKSPACE (matching the previous
+ * container action behavior); absolute patterns, including ~ expansion, are
+ * used as-is so runner-home directories (e.g. ~/.cargo/registry) can be
+ * cached.
+ */
 export async function resolvePaths(patterns: string[]): Promise<string[]> {
   const workspace = process.env['GITHUB_WORKSPACE'] || process.cwd();
-  // Anchor relative patterns at GITHUB_WORKSPACE: @actions/glob resolves
-  // relative patterns against process.cwd(), which for a Docker container
-  // action is the image WORKDIR (/action), not the workspace.
-  const anchoredPatterns = patterns.map(pattern =>
-    path.isAbsolute(pattern) ? pattern : path.join(workspace, pattern)
-  );
+  const anchoredPatterns = patterns
+    .map(expandTilde)
+    .map(pattern =>
+      path.isAbsolute(pattern) ? pattern : path.join(workspace, pattern)
+    );
   const globber = await glob.create(anchoredPatterns.join('\n'), {
     implicitDescendants: false
   });
 
   const resolved: string[] = [];
   for await (const file of globber.globGenerator()) {
-    const relativeFile = path.relative(workspace, file).replace(/\\/g, '/');
-    core.debug(`Matched: ${relativeFile}`);
-    resolved.push(relativeFile === '' ? '.' : relativeFile);
+    core.debug(`Matched: ${file}`);
+    resolved.push(file);
   }
 
   if (resolved.length === 0) {
@@ -36,60 +53,16 @@ export async function resolvePaths(patterns: string[]): Promise<string[]> {
   return resolved;
 }
 
-export async function createTar(
-  archiveFolder: string,
-  sourcePaths: string[],
-  compressionMethod: CompressionMethod
-): Promise<string> {
-  const manifestFilename = 'manifest.txt';
-  const cacheFileName = getCacheFileName(compressionMethod);
-  const workspace = process.env['GITHUB_WORKSPACE'] || process.cwd();
-
-  fs.writeFileSync(path.join(archiveFolder, manifestFilename), sourcePaths.join('\n'));
-
-  const args: string[] = [];
-  if (compressionMethod === CompressionMethod.Gzip) {
-    args.push('-z');
-  } else {
-    args.push('--use-compress-program', 'zstd -T0 --long=30');
-  }
-  args.push(
-    '-cf',
-    cacheFileName.replace(/\\/g, '/'),
-    '-P',
-    '-C',
-    workspace.replace(/\\/g, '/'),
-    '--files-from',
-    manifestFilename
-  );
-
-  await exec.exec('tar', args, { cwd: archiveFolder });
-
-  return path.join(archiveFolder, cacheFileName);
+/** Create a 7z archive of the resolved absolute paths. */
+export async function createCacheArchive(archiveFolder: string, sourcePaths: string[]): Promise<string> {
+  const archivePath = path.join(archiveFolder, CACHE_FILE_NAME);
+  await createArchive(archivePath, sourcePaths, process.env['GITHUB_WORKSPACE'] || process.cwd());
+  return archivePath;
 }
 
-export async function extractTar(
-  archivePath: string,
-  compressionMethod: CompressionMethod
-): Promise<void> {
-  const workspace = process.env['GITHUB_WORKSPACE'] || process.cwd();
-  await io.mkdirP(workspace);
-
-  const args: string[] = [];
-  if (compressionMethod === CompressionMethod.Gzip) {
-    args.push('-z');
-  } else {
-    args.push('--use-compress-program', 'zstd -d --long=30');
-  }
-  args.push(
-    '-xf',
-    archivePath.replace(/\\/g, '/'),
-    '-P',
-    '-C',
-    workspace.replace(/\\/g, '/')
-  );
-
-  await exec.exec('tar', args);
+/** Extract a 7z archive, restoring entries to their absolute paths. */
+export async function extractCacheArchive(archivePath: string): Promise<void> {
+  await extractArchive(archivePath, process.env['GITHUB_WORKSPACE'] || process.cwd());
 }
 
 export async function createTempDirectory(): Promise<string> {

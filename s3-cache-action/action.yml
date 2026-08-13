@@ -1,6 +1,6 @@
 name: 'S3 Cache'
 description: 'Cache dependencies and build outputs using S3-compatible storage'
-author: 'Your Organization'
+author: 'Silvenia'
 
 branding:
   icon: 'archive'
@@ -12,7 +12,7 @@ inputs:
     required: true
 
   path:
-    description: 'The path(s) to cache. Each path can be a directory or file. Glob patterns are supported. Paths are stored relative to the repository root.'
+    description: 'The path(s) to cache. Each path can be a directory or file. Glob patterns are supported. Relative paths are anchored at the repository root; absolute paths (including ~ expansion) are used as-is.'
     required: true
 
   restore-keys:
@@ -35,18 +35,23 @@ inputs:
     description: 'The S3 bucket name to store cache archives.'
     required: true
 
+  s3-region:
+    description: 'The region to send to the S3-compatible endpoint. Required by the AWS SDK; most self-hosted stores ignore it. Default is us-east-1.'
+    required: false
+    default: 'us-east-1'
+
   s3-path-style:
     description: 'When true, use path-style addressing (https://endpoint/bucket/key) for S3 requests. Required for most self-hosted S3-compatible services (MinIO, RustFS, Ceph). Set to false to use virtual-hosted-style addressing (https://bucket.endpoint/key), which is required for AWS S3 and some cloud providers. Default is true.'
     required: false
     default: 'true'
 
   upload-chunk-size:
-    description: 'The size of each chunk to upload, in bytes (passed to rclone as --s3-chunk-size). Default is 10485760 (10 MB). Increase for faster uploads of large caches.'
+    description: 'The size of each chunk to upload, in bytes, used for multipart uploads. Default is 10485760 (10 MB). Increase for faster uploads of large caches.'
     required: false
     default: '10485760'
 
   enableCrossOsArchive:
-    description: 'When enabled, allows Windows runners to save or restore caches independent of the operating system the cache was created on. Default is false.'
+    description: 'When enabled, allows caches to be saved or restored independent of the operating system the cache was created on. Default is false.'
     required: false
     default: 'false'
 
@@ -64,23 +69,7 @@ outputs:
     description: 'The primary key that was used to search for the cache.'
 
 runs:
-  using: 'docker'
-  image: 'Dockerfile'
-  entrypoint: '/action/entrypoint.sh'
-  post-entrypoint: '/action/entrypoint-save.sh'
-  post-if: 'success()'
-  env:
-    INPUT_KEY: ${{ inputs.key }}
-    INPUT_PATH: ${{ inputs.path }}
-    # Env var names must match the @actions/core lookup rule
-    # (`INPUT_<name>` with spaces replaced by `_` and uppercased; dashes and
-    # camelCase are preserved), not the action input ids.
-    INPUT_RESTORE-KEYS: ${{ inputs.restore-keys }}
-    INPUT_S3_ENDPOINT: ${{ inputs.s3-endpoint }}
-    INPUT_S3_ACCESS_KEY: ${{ inputs.s3-access-key }}
-    INPUT_S3_SECRET_KEY: ${{ inputs.s3-secret-key }}
-    INPUT_S3_BUCKET: ${{ inputs.s3-bucket }}
-    INPUT_S3_PATH_STYLE: ${{ inputs.s3-path-style }}
-    INPUT_UPLOAD_CHUNK_SIZE: ${{ inputs.upload-chunk-size }}
-    INPUT_ENABLECROSSOSARCHIVE: ${{ inputs.enableCrossOsArchive }}
-    INPUT_FAILONCACHEMISS: ${{ inputs.fail-on-cache-miss }}
+  using: node26
+  main: dist/restore/index.js
+  post: dist/save/index.js
+  post-if: success()

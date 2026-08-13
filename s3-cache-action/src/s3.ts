@@ -1,21 +1,31 @@
 import * as core from '@actions/core';
-import * as exec from '@actions/exec';
+import * as fs from 'fs';
+import { pipeline } from 'stream/promises';
+import {
+  DeleteObjectCommand,
+  GetObjectCommand,
+  HeadObjectCommand,
+  ListObjectsV2Command,
+  S3Client
+} from '@aws-sdk/client-s3';
+import { Upload } from '@aws-sdk/lib-storage';
+import { ARCHIVE_FORMAT } from './utils';
 
 export interface S3Config {
   endpoint: string;
   accessKeyId: string;
   secretAccessKey: string;
-  region?: string;
+  region: string;
   bucket: string;
   // true = path-style addressing (default); false = virtual-hosted-style addressing
   forcePathStyle: boolean;
-  // multipart chunk size in bytes (default 10 MiB); passed as --s3-chunk-size
+  // multipart chunk size in bytes (default 10 MiB)
   chunkSize?: number;
 }
 
 export interface CacheObjectMetadata {
-  cacheKey: string;
   cacheVersion: string;
+  format: string;
   platform: string;
   size: number;
 }
@@ -27,55 +37,40 @@ export interface CacheObject {
   lastModified: Date;
 }
 
-export function buildRcloneEnv(config: S3Config): Record<string, string> {
+/** Build the S3 client configuration from the action inputs. */
+export function getS3Config(): S3Config {
   return {
-    RCLONE_CONFIG_S3_TYPE: 's3',
-    RCLONE_CONFIG_S3_PROVIDER: 'Other',
-    RCLONE_CONFIG_S3_ENDPOINT: config.endpoint,
-    RCLONE_CONFIG_S3_ACCESS_KEY_ID: config.accessKeyId,
-    RCLONE_CONFIG_S3_SECRET_ACCESS_KEY: config.secretAccessKey,
-    RCLONE_CONFIG_S3_REGION: config.region || 'us-east-1',
-    RCLONE_CONFIG_S3_FORCE_PATH_STYLE: config.forcePathStyle ? 'true' : 'false',
-    RCLONE_CONFIG_S3_NO_CHECK_BUCKET: 'true'
+    endpoint: core.getInput('s3-endpoint', { required: true }),
+    accessKeyId: core.getInput('s3-access-key', { required: true }),
+    secretAccessKey: core.getInput('s3-secret-key', { required: true }),
+    bucket: core.getInput('s3-bucket', { required: true }),
+    // Defaults to path-style (true); any value other than the exact string 'false' enables it
+    forcePathStyle: core.getInput('s3-path-style') !== 'false',
+    region: core.getInput('s3-region') || 'us-east-1',
+    chunkSize: parseInt(core.getInput('upload-chunk-size') || '10485760', 10)
   };
 }
 
-export function remote(config: S3Config, key: string): string {
-  // Reference the "s3" remote by NAME (not the anonymous `:s3:` backend-type
-  // syntax): the `:s3:` form ignores the RCLONE_CONFIG_S3_* environment
-  // variables, which would make every operation anonymous.
-  return `s3:${config.bucket}/${key}`;
+function makeClient(config: S3Config): S3Client {
+  return new S3Client({
+    endpoint: config.endpoint,
+    region: config.region,
+    credentials: {
+      accessKeyId: config.accessKeyId,
+      secretAccessKey: config.secretAccessKey
+    },
+    forcePathStyle: config.forcePathStyle,
+    maxAttempts: 2
+  });
 }
 
-export async function execRclone(
-  args: string[],
-  config: S3Config
-): Promise<{ exitCode: number; stdout: string; stderr: string }> {
-  core.debug(`rclone ${args.join(' ')}`);
-  let stdout = '';
-  let stderr = '';
-  const exitCode = await exec.exec(
-    'rclone',
-    [
-      // Fail fast on unreachable endpoints: the AWS SDK backoff inside rclone
-      // retries connection errors for minutes on end by default.
-      '--retries',
-      '2',
-      '--low-level-retries',
-      '2',
-      ...args
-    ],
-    {
-      ignoreReturnCode: true,
-      silent: true,
-      env: { ...process.env, ...buildRcloneEnv(config) } as { [key: string]: string },
-      listeners: {
-        stdout: (data: Buffer): string => (stdout += data.toString()),
-        stderr: (data: Buffer): string => (stderr += data.toString())
-      }
-    }
-  );
-  return { exitCode, stdout, stderr };
+function parseMetadata(metadata: Record<string, string> | undefined): CacheObjectMetadata {
+  return {
+    cacheVersion: metadata?.['cache-version'] || '',
+    format: metadata?.['cache-format'] || ARCHIVE_FORMAT,
+    platform: metadata?.['cache-platform'] || '',
+    size: parseInt(metadata?.['cache-size'] || '0', 10) || 0
+  };
 }
 
 export async function putCacheObject(
@@ -87,71 +82,59 @@ export async function putCacheObject(
   const chunkSize = config.chunkSize || 10 * 1024 * 1024;
   core.debug(`Uploading cache archive to s3://${config.bucket}/${key}`);
 
-  const result = await execRclone(
-    [
-      'copyto',
-      archivePath,
-      remote(config, key),
-      '--s3-upload-cutoff',
-      '0',
-      '--s3-chunk-size',
-      String(chunkSize),
-      '--s3-upload-concurrency',
-      '4',
-      // --metadata is required for --metadata-set values to be transmitted to S3
-      '--metadata',
-      '--metadata-set',
-      `cache-key=${metadata.cacheKey}`,
-      '--metadata-set',
-      `cache-version=${metadata.cacheVersion}`,
-      '--metadata-set',
-      `cache-platform=${metadata.platform}`,
-      '--metadata-set',
-      `cache-size=${metadata.size}`,
-      '--quiet'
-    ],
-    config
-  );
-
-  if (result.exitCode !== 0) {
-    throw new Error(`rclone copyto failed (${result.exitCode}): ${result.stderr}`);
+  const client = makeClient(config);
+  const body = fs.createReadStream(archivePath);
+  // A ReadStream schedules its open asynchronously; swallow any late open
+  // error (e.g. the archive is cleaned up after the upload) so it cannot
+  // surface as an unhandled error on a later test/step.
+  body.on('error', () => {});
+  try {
+    const upload = new Upload({
+      client,
+      partSize: chunkSize,
+      queueSize: 4,
+      params: {
+        Bucket: config.bucket,
+        Key: key,
+        Body: body,
+        Metadata: {
+          'cache-version': metadata.cacheVersion,
+          'cache-format': metadata.format,
+          'cache-platform': metadata.platform,
+          'cache-size': String(metadata.size)
+        }
+      }
+    });
+    await upload.done();
+  } finally {
+    // Ensure the lazy stream open never outlives this function (a dangling
+    // open can fail after the archive is cleaned up).
+    body.destroy();
+    client.destroy();
   }
   core.debug(`Cache archive uploaded successfully: ${key}`);
 }
 
-export async function statCacheObject(
-  config: S3Config,
-  key: string
-): Promise<CacheObject | null> {
-  // rclone removed the `stat` command (>= 1.66); lsjson on the exact object
-  // path returns a single-element array for an existing object and an empty
-  // array for a missing object (exit code 0 in both cases when the bucket
-  // exists). Any other non-zero exit (e.g. missing bucket) is an error.
-  const result = await execRclone(
-    ['lsjson', remote(config, key), '--files-only', '--metadata', '--quiet'],
-    config
-  );
-  if (result.exitCode !== 0) {
-    throw new Error(`rclone lsjson failed (${result.exitCode}): ${result.stderr}`);
+export async function statCacheObject(config: S3Config, key: string): Promise<CacheObject | null> {
+  const client = makeClient(config);
+  try {
+    const out = await client.send(
+      new HeadObjectCommand({ Bucket: config.bucket, Key: key })
+    );
+    return {
+      key,
+      metadata: parseMetadata(out.Metadata),
+      size: out.ContentLength || 0,
+      lastModified: out.LastModified || new Date(0)
+    };
+  } catch (error) {
+    if ((error as { name?: string }).name === 'NotFound') {
+      return null;
+    }
+    throw error;
+  } finally {
+    client.destroy();
   }
-
-  const entries: any[] = JSON.parse(result.stdout || '[]');
-  if (entries.length === 0) {
-    return null;
-  }
-
-  const entry = entries[0];
-  return {
-    key,
-    metadata: {
-      cacheKey: entry.Metadata?.['cache-key'] || '',
-      cacheVersion: entry.Metadata?.['cache-version'] || '',
-      platform: entry.Metadata?.['cache-platform'] || '',
-      size: parseInt(entry.Metadata?.['cache-size'] || '0', 10) || 0
-    },
-    size: entry.Size || 0,
-    lastModified: new Date(entry.ModTime)
-  };
 }
 
 export async function downloadCacheObject(
@@ -159,9 +142,15 @@ export async function downloadCacheObject(
   key: string,
   destPath: string
 ): Promise<void> {
-  const result = await execRclone(['copyto', remote(config, key), destPath, '--quiet'], config);
-  if (result.exitCode !== 0) {
-    throw new Error(`rclone copyto failed (${result.exitCode}): ${result.stderr}`);
+  const client = makeClient(config);
+  try {
+    const out = await client.send(
+      new GetObjectCommand({ Bucket: config.bucket, Key: key })
+    );
+    const body = out.Body as unknown as NodeJS.ReadableStream;
+    await pipeline(body, fs.createWriteStream(destPath));
+  } finally {
+    client.destroy();
   }
 }
 
@@ -169,42 +158,30 @@ export async function listCacheObjects(
   config: S3Config,
   prefix: string
 ): Promise<CacheObject[]> {
-  // rclone lsjson does not support prefix matching on flat object keys: it
-  // treats the final path component as a directory name. Objects are stored
-  // flat in the bucket (key = cache key), so list the bucket root and filter
-  // by prefix here.
-  const result = await execRclone(
-    ['lsjson', `s3:${config.bucket}`, '--files-only', '--metadata', '--quiet'],
-    config
-  );
-  if (result.exitCode !== 0) {
-    throw new Error(`rclone lsjson failed (${result.exitCode}): ${result.stderr}`);
-  }
-
-  const entries: any[] = JSON.parse(result.stdout || '[]');
-  const objects: CacheObject[] = entries
-    .filter(entry => (entry.Path || entry.Name).startsWith(prefix))
-    .map(entry => ({
-      key: entry.Path || entry.Name,
-      metadata: {
-        cacheKey: entry.Metadata?.['cache-key'] || '',
-        cacheVersion: entry.Metadata?.['cache-version'] || '',
-        platform: entry.Metadata?.['cache-platform'] || '',
-        size: parseInt(entry.Metadata?.['cache-size'] || '0', 10) || 0
-      },
+  const client = makeClient(config);
+  try {
+    const out = await client.send(
+      new ListObjectsV2Command({ Bucket: config.bucket, Prefix: prefix })
+    );
+    const objects: CacheObject[] = (out.Contents || []).map(entry => ({
+      key: entry.Key || '',
+      metadata: parseMetadata(undefined),
       size: entry.Size || 0,
-      lastModified: new Date(entry.ModTime)
+      lastModified: entry.LastModified || new Date(0)
     }));
-
-  return objects.sort((a, b) => b.lastModified.getTime() - a.lastModified.getTime());
+    return objects.sort((a, b) => b.lastModified.getTime() - a.lastModified.getTime());
+  } finally {
+    client.destroy();
+  }
 }
 
-export async function deleteCacheObject(
-  config: S3Config,
-  key: string
-): Promise<void> {
-  const result = await execRclone(['deletefile', remote(config, key), '--quiet'], config);
-  if (result.exitCode !== 0) {
-    throw new Error(`rclone deletefile failed (${result.exitCode}): ${result.stderr}`);
+export async function deleteCacheObject(config: S3Config, key: string): Promise<void> {
+  const client = makeClient(config);
+  try {
+    await client.send(
+      new DeleteObjectCommand({ Bucket: config.bucket, Key: key })
+    );
+  } finally {
+    client.destroy();
   }
 }

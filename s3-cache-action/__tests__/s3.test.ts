@@ -1,306 +1,175 @@
-jest.mock('@actions/exec');
 jest.mock('@actions/core');
-import * as exec from '@actions/exec';
+jest.mock('@aws-sdk/client-s3');
+jest.mock('@aws-sdk/lib-storage');
+
+import * as core from '@actions/core';
+import { Readable } from 'stream';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
+import {
+  DeleteObjectCommand,
+  GetObjectCommand,
+  HeadObjectCommand,
+  ListObjectsV2Command,
+  S3Client
+} from '@aws-sdk/client-s3';
+import { Upload } from '@aws-sdk/lib-storage';
 import {
   S3Config,
-  buildRcloneEnv,
-  deleteCacheObject,
-  downloadCacheObject,
-  execRclone,
+  getS3Config,
+  statCacheObject,
   listCacheObjects,
   putCacheObject,
-  remote,
-  statCacheObject
+  downloadCacheObject,
+  deleteCacheObject
 } from '../src/s3';
-
-const RETRY_ARGS = ['--retries', '2', '--low-level-retries', '2'];
 
 const config: S3Config = {
   endpoint: 'https://s3.example.com',
   accessKeyId: 'AKIAEXAMPLE',
   secretAccessKey: 'secret',
+  region: 'us-east-1',
   bucket: 'bucket',
-  forcePathStyle: true
+  forcePathStyle: true,
+  chunkSize: 10485760
 };
 
-function mockExec(exitCode: number, stdout: string = '', stderr: string = ''): jest.Mock {
-  return (exec.exec as jest.Mock).mockImplementation(
-    async (_commandLine: string, _args: string[], options?: any) => {
-      if (options?.listeners?.stdout) {
-        options.listeners.stdout(Buffer.from(stdout));
-      }
-      if (options?.listeners?.stderr) {
-        options.listeners.stderr(Buffer.from(stderr));
-      }
-      return exitCode;
-    }
-  );
-}
+const sendMock = jest.fn();
+(S3Client as unknown as jest.Mock).mockImplementation(() => ({
+  send: sendMock,
+  destroy: jest.fn()
+}));
 
 beforeEach(() => {
   jest.clearAllMocks();
+  sendMock.mockReset();
 });
 
-describe('buildRcloneEnv', () => {
-  it('configures the s3 remote with path-style addressing when forcePathStyle is true', () => {
-    const env = buildRcloneEnv(config);
-    expect(env).toMatchObject({
-      RCLONE_CONFIG_S3_TYPE: 's3',
-      RCLONE_CONFIG_S3_PROVIDER: 'Other',
-      RCLONE_CONFIG_S3_ENDPOINT: 'https://s3.example.com',
-      RCLONE_CONFIG_S3_ACCESS_KEY_ID: 'AKIAEXAMPLE',
-      RCLONE_CONFIG_S3_SECRET_ACCESS_KEY: 'secret',
-      RCLONE_CONFIG_S3_REGION: 'us-east-1',
-      RCLONE_CONFIG_S3_FORCE_PATH_STYLE: 'true',
-      RCLONE_CONFIG_S3_NO_CHECK_BUCKET: 'true'
-    });
-  });
-
-  it('uses virtual-hosted-style addressing when forcePathStyle is false', () => {
-    const env = buildRcloneEnv({ ...config, forcePathStyle: false });
-    expect(env.RCLONE_CONFIG_S3_FORCE_PATH_STYLE).toBe('false');
-  });
-});
-
-describe('remote', () => {
-  it('builds the rclone remote path', () => {
-    expect(remote(config, 'key1')).toBe('s3:bucket/key1');
-  });
-});
-
-describe('execRclone', () => {
-  it('merges process.env with the rclone config environment', async () => {
-    mockExec(0);
-    await execRclone(['stat', 's3:bucket/key1'], config);
-
-    expect(exec.exec).toHaveBeenCalledWith(
-      'rclone',
-      [...RETRY_ARGS, 'stat', 's3:bucket/key1'],
-      expect.objectContaining({
-        env: expect.objectContaining({
-          ...process.env,
-          RCLONE_CONFIG_S3_TYPE: 's3',
-          RCLONE_CONFIG_S3_ENDPOINT: 'https://s3.example.com'
-        })
-      })
-    );
-  });
-
-  it('captures stdout, stderr and exit code from the exec listeners', async () => {
-    mockExec(4, 'out-text', 'err-text');
-    const result = await execRclone(['stat', 's3:bucket/key1'], config);
-
-    expect(result).toEqual({ exitCode: 4, stdout: 'out-text', stderr: 'err-text' });
-  });
-});
-
-describe('putCacheObject', () => {
-  it('builds the multipart upload arguments with metadata', async () => {
-    mockExec(0);
-    await putCacheObject(config, 'key1', '/tmp/cache.tgz', {
-      cacheKey: 'key1',
-      cacheVersion: 'v1',
-      platform: 'linux',
-      size: 123
+describe('getS3Config', () => {
+  it('reads inputs with defaults', () => {
+    (core.getInput as jest.Mock).mockImplementation((name: string) => {
+      switch (name) {
+        case 's3-endpoint':
+          return 'https://s3.example.com';
+        case 's3-access-key':
+          return 'key';
+        case 's3-secret-key':
+          return 'secret';
+        case 's3-bucket':
+          return 'bucket';
+        default:
+          return '';
+      }
     });
 
-    expect(exec.exec).toHaveBeenCalledWith(
-      'rclone',
-      [
-        ...RETRY_ARGS,
-        'copyto',
-        '/tmp/cache.tgz',
-        's3:bucket/key1',
-        '--s3-upload-cutoff',
-        '0',
-        '--s3-chunk-size',
-        '10485760',
-        '--s3-upload-concurrency',
-        '4',
-        '--metadata',
-        '--metadata-set',
-        'cache-key=key1',
-        '--metadata-set',
-        'cache-version=v1',
-        '--metadata-set',
-        'cache-platform=linux',
-        '--metadata-set',
-        'cache-size=123',
-        '--quiet'
-      ],
-      expect.anything()
-    );
-  });
-
-  it('throws with stderr on a non-zero exit code', async () => {
-    mockExec(1, '', 'boom');
-    await expect(
-      putCacheObject(config, 'key1', '/tmp/cache.tgz', {
-        cacheKey: 'key1',
-        cacheVersion: 'v1',
-        platform: 'linux',
-        size: 123
-      })
-    ).rejects.toThrow('boom');
+    const cfg = getS3Config();
+    expect(cfg.region).toBe('us-east-1');
+    expect(cfg.forcePathStyle).toBe(true);
+    expect(cfg.chunkSize).toBe(10485760);
   });
 });
 
 describe('statCacheObject', () => {
-  const statJson = JSON.stringify([
-    {
-      Path: 'key1',
-      Name: 'key1',
-      Size: 12345,
-      ModTime: '2024-01-01T00:00:00.000Z',
-      IsDir: false,
-      Metadata: {
-        'cache-key': 'key1',
-        'cache-version': 'abc123',
-        'cache-platform': 'linux',
-        'cache-size': '12345'
-      }
-    }
-  ]);
-
-  it('parses a hit into a CacheObject', async () => {
-    mockExec(0, statJson);
-    const obj = await statCacheObject(config, 'key1');
-
-    expect(exec.exec).toHaveBeenCalledWith(
-      'rclone',
-      [...RETRY_ARGS, 'lsjson', 's3:bucket/key1', '--files-only', '--metadata', '--quiet'],
-      expect.anything()
-    );
-    expect(obj).not.toBeNull();
-    expect(obj!.key).toBe('key1');
-    expect(obj!.metadata).toEqual({
-      cacheKey: 'key1',
-      cacheVersion: 'abc123',
-      platform: 'linux',
-      size: 12345
+  it('returns the object with parsed metadata', async () => {
+    sendMock.mockResolvedValue({
+      Metadata: { 'cache-version': 'abc', 'cache-format': '7z', 'cache-platform': 'linux', 'cache-size': '123' },
+      ContentLength: 123,
+      LastModified: new Date('2024-01-01T00:00:00.000Z')
     });
-    expect(obj!.size).toBe(12345);
-    expect(obj!.lastModified).toEqual(new Date('2024-01-01T00:00:00.000Z'));
+
+    const result = await statCacheObject(config, 'key1');
+    expect(result).toEqual({
+      key: 'key1',
+      metadata: { cacheVersion: 'abc', format: '7z', platform: 'linux', size: 123 },
+      size: 123,
+      lastModified: new Date('2024-01-01T00:00:00.000Z')
+    });
+    expect(sendMock).toHaveBeenCalledWith(expect.any(HeadObjectCommand));
   });
 
-  it('returns null when the object does not exist (empty listing)', async () => {
-    mockExec(0, '[]');
-    const obj = await statCacheObject(config, 'key1');
-    expect(obj).toBeNull();
+  it('returns null when the object does not exist', async () => {
+    sendMock.mockRejectedValue({ name: 'NotFound' });
+    await expect(statCacheObject(config, 'key1')).resolves.toBeNull();
   });
 
-  it('throws with stderr on other non-zero exit codes', async () => {
-    mockExec(5, '', 'bad config');
-    await expect(statCacheObject(config, 'key1')).rejects.toThrow('bad config');
-  });
-});
-
-describe('downloadCacheObject', () => {
-  it('invokes copyto with the remote and destination', async () => {
-    mockExec(0);
-    await downloadCacheObject(config, 'key1', '/tmp/cache.tgz');
-
-    expect(exec.exec).toHaveBeenCalledWith(
-      'rclone',
-      [...RETRY_ARGS, 'copyto', 's3:bucket/key1', '/tmp/cache.tgz', '--quiet'],
-      expect.anything()
-    );
-  });
-
-  it('throws with stderr on a non-zero exit code', async () => {
-    mockExec(1, '', 'no such object');
-    await expect(downloadCacheObject(config, 'key1', '/tmp/cache.tgz')).rejects.toThrow(
-      'no such object'
-    );
+  it('rethrows other errors', async () => {
+    sendMock.mockRejectedValue(new Error('boom'));
+    await expect(statCacheObject(config, 'key1')).rejects.toThrow('boom');
   });
 });
 
 describe('listCacheObjects', () => {
-  const lsjson = JSON.stringify([
-    {
-      Path: 'other-key',
-      Name: 'other-key',
-      Size: 300,
-      ModTime: '2024-01-03T00:00:00.000Z',
-      Metadata: {
-        'cache-key': 'other-key',
-        'cache-version': 'v1',
-        'cache-platform': 'linux',
-        'cache-size': '300'
-      }
-    },
-    {
-      Path: 'linux-npm-bbb',
-      Name: 'linux-npm-bbb',
-      Size: 200,
-      ModTime: '2024-01-01T00:00:00.000Z',
-      Metadata: {
-        'cache-key': 'linux-npm-bbb',
-        'cache-version': 'v1',
-        'cache-platform': 'linux',
-        'cache-size': '200'
-      }
-    },
-    {
-      Path: 'linux-npm-aaa',
-      Name: 'linux-npm-aaa',
-      Size: 100,
-      ModTime: '2024-01-02T00:00:00.000Z',
-      Metadata: {
-        'cache-key': 'linux-npm-aaa',
-        'cache-version': 'v1',
-        'cache-platform': 'linux',
-        'cache-size': '100'
-      }
-    }
-  ]);
-
-  it('lists the bucket root and filters by prefix, sorted by lastModified descending', async () => {
-    mockExec(0, lsjson);
-    const objects = await listCacheObjects(config, 'linux-npm-');
-
-    expect(exec.exec).toHaveBeenCalledWith(
-      'rclone',
-      [...RETRY_ARGS, 'lsjson', 's3:bucket', '--files-only', '--metadata', '--quiet'],
-      expect.anything()
-    );
-    expect(objects.map(o => o.key)).toEqual(['linux-npm-aaa', 'linux-npm-bbb']);
-  });
-
-  it('maps metadata from each entry', async () => {
-    mockExec(0, lsjson);
-    const objects = await listCacheObjects(config, 'linux-npm-');
-
-    expect(objects[0].metadata).toEqual({
-      cacheKey: 'linux-npm-aaa',
-      cacheVersion: 'v1',
-      platform: 'linux',
-      size: 100
+  it('lists objects sorted by last modified descending', async () => {
+    sendMock.mockResolvedValue({
+      Contents: [
+        { Key: 'old', Size: 1, LastModified: new Date('2024-01-01T00:00:00.000Z') },
+        { Key: 'new', Size: 2, LastModified: new Date('2024-02-01T00:00:00.000Z') }
+      ]
     });
-    expect(objects[0].size).toBe(100);
-  });
 
-  it('returns an empty array when no objects match the prefix', async () => {
-    mockExec(0, lsjson);
-    const objects = await listCacheObjects(config, 'zzz-no-match-');
-    expect(objects).toEqual([]);
+    const result = await listCacheObjects(config, 'linux-npm-');
+    expect(result.map(o => o.key)).toEqual(['new', 'old']);
+    expect(sendMock).toHaveBeenCalledWith(expect.any(ListObjectsV2Command));
   });
+});
 
-  it('throws with stderr on a non-zero exit code', async () => {
-    mockExec(2, '', 'access denied');
-    await expect(listCacheObjects(config, 'linux-npm-')).rejects.toThrow('access denied');
+describe('putCacheObject', () => {
+  it('uploads with metadata via the managed multipart upload', async () => {
+    const doneMock = jest.fn().mockResolvedValue(undefined);
+    (Upload as unknown as jest.Mock).mockImplementation(() => ({ done: doneMock }));
+    const archivePath = path.join(os.tmpdir(), `put-test-${process.pid}.bin`);
+    fs.writeFileSync(archivePath, 'archive-data');
+
+    try {
+      await putCacheObject(config, 'key1', archivePath, {
+        cacheVersion: 'abc',
+        format: '7z',
+        platform: 'linux',
+        size: 12
+      });
+
+      expect(Upload).toHaveBeenCalledWith(
+        expect.objectContaining({
+          partSize: 10485760,
+          params: expect.objectContaining({
+            Bucket: 'bucket',
+            Key: 'key1',
+            Metadata: expect.objectContaining({
+              'cache-version': 'abc',
+              'cache-format': '7z',
+              'cache-platform': 'linux',
+              'cache-size': '12'
+            })
+          })
+        })
+      );
+      expect(doneMock).toHaveBeenCalled();
+    } finally {
+      fs.rmSync(archivePath, { force: true });
+    }
+  });
+});
+
+describe('downloadCacheObject', () => {
+  it('streams the object body to the destination file', async () => {
+    sendMock.mockResolvedValue({ Body: Readable.from(['downloaded-data']) });
+    const dest = path.join(os.tmpdir(), `dl-test-${process.pid}.bin`);
+
+    try {
+      await downloadCacheObject(config, 'key1', dest);
+      expect(fs.readFileSync(dest, 'utf8')).toBe('downloaded-data');
+      expect(sendMock).toHaveBeenCalledWith(expect.any(GetObjectCommand));
+    } finally {
+      fs.rmSync(dest, { force: true });
+    }
   });
 });
 
 describe('deleteCacheObject', () => {
-  it('invokes deletefile with the remote', async () => {
-    mockExec(0);
+  it('deletes the object', async () => {
+    sendMock.mockResolvedValue({});
     await deleteCacheObject(config, 'key1');
-
-    expect(exec.exec).toHaveBeenCalledWith(
-      'rclone',
-      [...RETRY_ARGS, 'deletefile', 's3:bucket/key1', '--quiet'],
-      expect.anything()
-    );
+    expect(sendMock).toHaveBeenCalledWith(expect.any(DeleteObjectCommand));
   });
 });

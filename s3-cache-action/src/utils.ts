@@ -1,12 +1,11 @@
 import * as core from '@actions/core';
-import * as exec from '@actions/exec';
 import * as crypto from 'crypto';
 
-export enum CompressionMethod {
-  Gzip = 'gzip',
-  Zstd = 'zstd',
-  ZstdWithoutLong = 'zstd-without-long'
-}
+/** Archive format produced by this version of the action (7-Zip, LZMA2). */
+export const ARCHIVE_FORMAT = '7z';
+
+/** Name of the archive file within the temporary directory. */
+export const CACHE_FILE_NAME = 'cache.7z';
 
 export class ValidationError extends Error {
   constructor(message: string) {
@@ -65,38 +64,19 @@ export function validatePaths(paths: string[]): void {
   }
 }
 
-export async function getCompressionMethod(): Promise<CompressionMethod> {
-  let versionOutput = '';
-  // `input` must be truthy: @actions/exec only calls cp.stdin.end() when
-  // options.input is set, otherwise zstd blocks forever reading the open
-  // stdin pipe.
-  await exec.exec('zstd', ['--quiet'], {
-    ignoreReturnCode: true,
-    silent: true,
-    input: Buffer.from('\n'),
-    listeners: {
-      stdout: (data: Buffer): string => (versionOutput += data.toString()),
-      stderr: (data: Buffer): string => (versionOutput += data.toString())
-    }
-  });
-  return versionOutput.trim() === '' ? CompressionMethod.Gzip : CompressionMethod.ZstdWithoutLong;
-}
-
-export function getCacheFileName(compressionMethod: CompressionMethod): string {
-  return compressionMethod === CompressionMethod.Gzip ? 'cache.tgz' : 'cache.tzst';
-}
-
+/**
+ * Compute the cache version for a set of resolved paths. The version is
+ * stored as object metadata and matched on restore so that archives written
+ * by older action versions (different format/compression) are never restored
+ * or overwritten.
+ */
 export function getCacheVersion(
   paths: string[],
-  compressionMethod: CompressionMethod | undefined,
   enableCrossOsArchive: boolean
 ): string {
-  const versionSalt = '1.0';
-  const components = [...paths];
+  const versionSalt = '2.0';
+  const components = [...paths, ARCHIVE_FORMAT];
 
-  if (compressionMethod) {
-    components.push(compressionMethod);
-  }
   if (process.platform === 'win32' && !enableCrossOsArchive) {
     components.push('windows-only');
   }
