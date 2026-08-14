@@ -1,5 +1,16 @@
 # Changelog
 
+## [2.0.0](https://github.com/silvenia/github-actions/compare/v1.1.0...v2.0.0) (2026-08-13)
+
+
+### ⚠ BREAKING CHANGES
+
+* v2 drops the rclone-based Docker action. The action now runs as a Node.js action (works on Linux, macOS and Windows runners) using @aws-sdk/client-s3 and the runner's 7-Zip binary. Supports caching runner-home directories via ~ expansion; adds the s3-region input. Archives use the 7z format with a bumped cache-version, so v1 zstd objects are ignored on restore.
+
+### Features
+
+* rewrite s3-cache-action as a Node 26 action with 7-Zip ([fd91b92](https://github.com/silvenia/github-actions/commit/fd91b92c2c3cc479c77bad6fb4acac79bb8772c2))
+
 ## [1.1.0](https://github.com/silvenia/github-actions/compare/v1.0.0...v1.1.0) (2026-08-02)
 
 
