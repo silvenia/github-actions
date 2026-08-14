@@ -60772,13 +60772,17 @@ const CACHE_SIZE_LIMIT = 5 * 1024 * 1024 * 1024; // 5 GB
 async function saveCache(primaryKey, paths, enableCrossOsArchive, config) {
     (0, utils_1.validateKey)(primaryKey);
     (0, utils_1.validatePaths)(paths);
-    if (await (0, s3_1.statCacheObject)(config, primaryKey)) {
+    const resolvedPaths = await (0, cache_1.resolvePaths)(paths);
+    core.debug(`Resolved Cache Paths: ${JSON.stringify(resolvedPaths)}`);
+    const cacheVersion = (0, utils_1.getCacheVersion)(enableCrossOsArchive);
+    const existing = await (0, s3_1.statCacheObject)(config, primaryKey);
+    if (existing && existing.metadata.cacheVersion === cacheVersion) {
         core.info(`Cache already exists with key ${primaryKey}, not saving cache.`);
         return;
     }
-    const resolvedPaths = await (0, cache_1.resolvePaths)(paths);
-    core.debug(`Resolved Cache Paths: ${JSON.stringify(resolvedPaths)}`);
-    const cacheVersion = (0, utils_1.getCacheVersion)(resolvedPaths, enableCrossOsArchive);
+    if (existing) {
+        core.info(`Cache entry ${primaryKey} exists but was written by an incompatible action version, overwriting it.`);
+    }
     const tempDir = await (0, cache_1.createTempDirectory)();
     let archivePath;
     try {
@@ -60910,14 +60914,16 @@ function validatePaths(paths) {
     }
 }
 /**
- * Compute the cache version for a set of resolved paths. The version is
+ * Compute the cache version for the action implementation. The version is
  * stored as object metadata and matched on restore so that archives written
  * by older action versions (different format/compression) are never restored
- * or overwritten.
+ * or overwritten. The version intentionally does not depend on the cached
+ * paths: the cache key already identifies the cache entry, and deriving the
+ * version from paths makes it machine-dependent and non-portable.
  */
-function getCacheVersion(paths, enableCrossOsArchive) {
+function getCacheVersion(enableCrossOsArchive) {
     const versionSalt = '2.0';
-    const components = [...paths, exports.ARCHIVE_FORMAT];
+    const components = [exports.ARCHIVE_FORMAT];
     if (process.platform === 'win32' && !enableCrossOsArchive) {
         components.push('windows-only');
     }

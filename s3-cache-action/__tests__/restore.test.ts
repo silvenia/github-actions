@@ -18,7 +18,7 @@ const config: s3.S3Config = {
 };
 
 const PATHS = ['p1'];
-const VERSION = getCacheVersion(PATHS, false);
+const VERSION = getCacheVersion(false);
 
 function cacheObject(key: string, cacheVersion: string = VERSION): s3.CacheObject {
   return {

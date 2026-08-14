@@ -60591,7 +60591,7 @@ const utils_1 = __nccwpck_require__(1798);
 async function restoreCache(primaryKey, restoreKeys, paths, enableCrossOsArchive, failOnCacheMiss, config) {
     (0, utils_1.validateKey)(primaryKey);
     (0, utils_1.validatePaths)(paths);
-    const cacheVersion = (0, utils_1.getCacheVersion)(paths, enableCrossOsArchive);
+    const cacheVersion = (0, utils_1.getCacheVersion)(enableCrossOsArchive);
     core.debug(`Cache version: ${cacheVersion}`);
     const keysToSearch = [primaryKey, ...restoreKeys];
     core.debug(`Keys to search: ${JSON.stringify(keysToSearch)}`);
@@ -60941,14 +60941,16 @@ function validatePaths(paths) {
     }
 }
 /**
- * Compute the cache version for a set of resolved paths. The version is
+ * Compute the cache version for the action implementation. The version is
  * stored as object metadata and matched on restore so that archives written
  * by older action versions (different format/compression) are never restored
- * or overwritten.
+ * or overwritten. The version intentionally does not depend on the cached
+ * paths: the cache key already identifies the cache entry, and deriving the
+ * version from paths makes it machine-dependent and non-portable.
  */
-function getCacheVersion(paths, enableCrossOsArchive) {
+function getCacheVersion(enableCrossOsArchive) {
     const versionSalt = '2.0';
-    const components = [...paths, exports.ARCHIVE_FORMAT];
+    const components = [exports.ARCHIVE_FORMAT];
     if (process.platform === 'win32' && !enableCrossOsArchive) {
         components.push('windows-only');
     }

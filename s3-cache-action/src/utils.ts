@@ -65,17 +65,16 @@ export function validatePaths(paths: string[]): void {
 }
 
 /**
- * Compute the cache version for a set of resolved paths. The version is
+ * Compute the cache version for the action implementation. The version is
  * stored as object metadata and matched on restore so that archives written
  * by older action versions (different format/compression) are never restored
- * or overwritten.
+ * or overwritten. The version intentionally does not depend on the cached
+ * paths: the cache key already identifies the cache entry, and deriving the
+ * version from paths makes it machine-dependent and non-portable.
  */
-export function getCacheVersion(
-  paths: string[],
-  enableCrossOsArchive: boolean
-): string {
+export function getCacheVersion(enableCrossOsArchive: boolean): string {
   const versionSalt = '2.0';
-  const components = [...paths, ARCHIVE_FORMAT];
+  const components = [ARCHIVE_FORMAT];
 
   if (process.platform === 'win32' && !enableCrossOsArchive) {
     components.push('windows-only');

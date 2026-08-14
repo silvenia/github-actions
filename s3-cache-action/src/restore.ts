@@ -16,7 +16,7 @@ export async function restoreCache(
   validateKey(primaryKey);
   validatePaths(paths);
 
-  const cacheVersion = getCacheVersion(paths, enableCrossOsArchive);
+  const cacheVersion = getCacheVersion(enableCrossOsArchive);
   core.debug(`Cache version: ${cacheVersion}`);
 
   const keysToSearch = [primaryKey, ...restoreKeys];

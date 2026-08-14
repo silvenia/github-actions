@@ -15,15 +15,21 @@ export async function saveCache(
   validateKey(primaryKey);
   validatePaths(paths);
 
-  if (await statCacheObject(config, primaryKey)) {
-    core.info(`Cache already exists with key ${primaryKey}, not saving cache.`);
-    return;
-  }
-
   const resolvedPaths = await resolvePaths(paths);
   core.debug(`Resolved Cache Paths: ${JSON.stringify(resolvedPaths)}`);
 
-  const cacheVersion = getCacheVersion(resolvedPaths, enableCrossOsArchive);
+  const cacheVersion = getCacheVersion(enableCrossOsArchive);
+
+  const existing = await statCacheObject(config, primaryKey);
+  if (existing && existing.metadata.cacheVersion === cacheVersion) {
+    core.info(`Cache already exists with key ${primaryKey}, not saving cache.`);
+    return;
+  }
+  if (existing) {
+    core.info(
+      `Cache entry ${primaryKey} exists but was written by an incompatible action version, overwriting it.`
+    );
+  }
 
   const tempDir = await createTempDirectory();
   let archivePath: string;

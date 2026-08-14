@@ -30,18 +30,14 @@ describe('validatePaths', () => {
 
 describe('getCacheVersion', () => {
   it('is deterministic for the same inputs', () => {
-    expect(getCacheVersion(['p1'], false)).toBe(getCacheVersion(['p1'], false));
-  });
-
-  it('differs when paths differ', () => {
-    expect(getCacheVersion(['p1'], false)).not.toBe(getCacheVersion(['p2'], false));
+    expect(getCacheVersion(false)).toBe(getCacheVersion(false));
   });
 
   it('differs when cross-os archive is enabled on win32', () => {
     const original = process.platform;
     Object.defineProperty(process, 'platform', { value: 'win32' });
     try {
-      expect(getCacheVersion(['p1'], false)).not.toBe(getCacheVersion(['p1'], true));
+      expect(getCacheVersion(false)).not.toBe(getCacheVersion(true));
     } finally {
       Object.defineProperty(process, 'platform', { value: original });
     }
