@@ -69,7 +69,7 @@ outputs:
     description: 'The primary key that was used to search for the cache.'
 
 runs:
-  using: node26
+  using: node24
   main: dist/restore/index.js
   post: dist/save/index.js
   post-if: success()
