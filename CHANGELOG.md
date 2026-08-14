@@ -1,5 +1,13 @@
 # Changelog
 
+## [2.0.1](https://github.com/silvenia/github-actions/compare/v2.0.0...v2.0.1) (2026-08-14)
+
+
+### Bug Fixes
+
+* align save/restore cache-version and drop paths from it ([b3a73fd](https://github.com/silvenia/github-actions/commit/b3a73fd3bb6134fce252a799235aad2845f09421))
+* node24 instead of node26 ([9af4c32](https://github.com/silvenia/github-actions/commit/9af4c3288469fa86c043cf3683e2f07ce65b15f5))
+
 ## [2.0.0](https://github.com/silvenia/github-actions/compare/v1.1.0...v2.0.0) (2026-08-13)
 
 
